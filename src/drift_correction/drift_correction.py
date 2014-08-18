@@ -15,7 +15,7 @@ Transform = namedtuple('Transform', ['position', 'orientation'])
 
 class DriftCorrection():
 
-    markers = [79,83,85,91,94]
+    markers = [8,11,28,48,89]
 
     broadcaster = None
     listener    = None
@@ -30,30 +30,17 @@ class DriftCorrection():
 
     def start(self):
         self.get_static_marker_transforms()
-
-        print self.marker_static_tranformations
-
-        rospy.Subscriber("ar_pose_marker", ARMarkers, self.marker_callback)
-
-
+        rospy.Subscriber("ar_pose_marker", ARMarkers, self.marker_callback, queue_size=1)
         r = rospy.Rate(10) # 10hz
         while not rospy.is_shutdown():      
             r.sleep()
 
     def get_static_marker_transforms(self):
         for marker in self.markers:
-            try:
-                self.listener.waitForTransform("/map", marker, rospy.Time(), rospy.Duration(4.0))
-            except:
-                pass
-
-            try:
-                now = rospy.Time.now()
-                self.listener.waitForTransform("/map", marker, now, rospy.Duration(4.0))
-                self.marker_static_tranformations[marker] = self.get_transform("/map", marker, now)
-            except (tf.Exception):
-                print "Error while getting static transformations"
-
+            print "Loading static transform for marker ", marker
+            self.listener.waitForTransform("map", marker, rospy.Time(), rospy.Duration(4.0))
+            tran, rot = self.listener.lookupTransform("map", marker, rospy.Time(0))
+            self.marker_static_tranformations[marker] = Transform(position=tran, orientation=rot)
 
     def make_tuple_from_point(self, point):
         return (point.x, point.y, point.z)
@@ -79,32 +66,38 @@ class DriftCorrection():
     	return Transform(position=tfmath.translation_from_matrix(inverted_matrix),
     					 orientation=tfmath.quaternion_from_matrix(inverted_matrix))
 
-    def get_transform(self, from_frame, to_frame, time):
+    def get_transform(self, from_frame, to_frame):
     	trans, rot = (None,None)
+        self.listener.waitForTransform(from_frame, to_frame, rospy.Time(), rospy.Duration(4.0))
         try:
-            self.listener.waitForTransform(from_frame, to_frame, time, rospy.Duration(1))
-            (trans, rot) = self.listener.lookupTransform(from_frame, to_frame, time)
-        except (tf.Exception):
-            print "Error while getting runtime transform"
+            now = rospy.Time.now()
+            self.listener.waitForTransform(from_frame, to_frame, now, rospy.Duration(4.0))
+            (trans, rot) = self.listener.lookupTransform(from_frame, to_frame, now)
+        except (tf.Exception) as e:
+            print "Error while getting runtime transform", e 
         return Transform(position=trans, orientation=rot)
 
     def marker_callback(self, data):
 
         if len(data.markers) < 1:
             self.broadcast_drift_correction(rospy.Time.now())
+            print "No markers detected"
             return
 
         chosen_marker = None
+        max_confidence_level = 0
         for marker in data.markers:
-        	if marker.header.frame_id in self.marker_static_tranformations.keys():
+        	if marker.header.frame_id in self.marker_static_tranformations.keys() and marker.confidence > max_confidence_level:
         		chosen_marker = marker
+                max_confidence_level = marker.confidence
 
         if chosen_marker == None:
-        	self.broadcast_drift_correction(rospy.Time.now())
-        	return
+            print "Detected marker is not in the set."
+            self.broadcast_drift_correction(rospy.Time.now())
+            return
 
-        marker_to_camera_pos  = self.make_tuple_from_point(marker.pose.pose.position)
-        marker_to_camera_quat = self.make_tuple_from_quat(marker.pose.pose.orientation)
+        marker_to_camera_pos  = self.make_tuple_from_point(chosen_marker.pose.pose.position)
+        marker_to_camera_quat = self.make_tuple_from_quat(chosen_marker.pose.pose.orientation)
 
 
         marker_to_camera = self.invert_transform(Transform(position=marker_to_camera_pos,
@@ -112,10 +105,10 @@ class DriftCorrection():
 
         map_to_camera = self.mul_transforms(self.marker_static_tranformations[chosen_marker.header.frame_id], marker_to_camera)
 
-        print "Looking at ", chosen_marker.header.frame_id
+        print "Looking at ", chosen_marker.header.frame_id, " confidence: ", chosen_marker.confidence
 
         now = rospy.Time.now()
-        odom_to_camera = self.get_transform("/CameraTop_frame", "/odom", now)
+        odom_to_camera = self.get_transform("/CameraTop_frame", "/odom")
 
         if odom_to_camera.position != None and odom_to_camera.orientation != None:
         	self.current_drift_correction_transform = self.mul_transforms(map_to_camera, odom_to_camera)
