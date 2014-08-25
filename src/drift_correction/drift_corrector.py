@@ -144,9 +144,11 @@ class PoseFilter():
     def apply_filter(self):
         self.buffer_lock.acquire(blocking=True)
         self.drop_impossible_frames()
-        rospy.loginfo("Applying distance filter")
+        rospy.loginfo("Applying filter")
         
         for marker_name, frames in self.frames_buffer.items():
+            rospy.loginfo("  Processing marker: %s", marker_name)
+
             self.median_filter(marker_name, self.frames_buffer[marker_name])
             self.distance_filter(marker_name, self.frames_buffer[marker_name])
             self.distance_filter(marker_name, self.frames_buffer[marker_name])
@@ -154,7 +156,9 @@ class PoseFilter():
         self.buffer_lock.release()
 
     def distance_filter(self, marker_name, frames):
-        rospy.loginfo("  Processing marker: %s", marker_name)
+        if len(frames) == 0:
+            return
+
         translations = [x[0] for x in frames]
         yaws = [f[1][2] for f in frames]
 
@@ -176,7 +180,8 @@ class PoseFilter():
             print mar[0], mar[3]
 
     def median_filter(self, marker_name, frames):
-        rospy.loginfo("  Processing marker: %s", marker_name)
+        if len(frames) == 0:
+            return
         
         translations = [x[0] for x in frames]
         yaws = [f[1][2] for f in frames]
@@ -214,21 +219,21 @@ class PoseFilter():
 
     def determine_map_validity(self, frame):
         if abs(frame[0][2]) > self.ground_treshold:
-            print frame[0][2]
-            rospy.loginfo("\tOver ground positional treshold")
+            rospy.loginfo("\tOver ground positional treshold: {0:3f}".format(frame[0][2]))
             return False
         elif abs(frame[1][0]) > self.ground_roll_treshold:
-            rospy.loginfo("\tOver ground roll treshold")
+            rospy.loginfo("\tOver ground roll treshold: {0:3f}".format(frame[1][0]))
             return False
         elif abs(frame[1][1]) > self.ground_pitch_treshold:
-            rospy.loginfo("\tOver ground pitch treshold")
+            rospy.loginfo("\tOver ground pitch treshold: {0:3f}".format(frame[1][1]))
             return False
         else:
             return True
 
 class DriftCorrection():
 
-    marker_names = [8]#,11,28,48,89]
+    #marker_names = [8,11,28,48,89]
+    marker_names = [28]
 
     odom_frame_id   = "odom"
     camera_frame_id = "CameraTop_frame"
