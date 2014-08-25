@@ -143,24 +143,29 @@ class PoseFilter():
 
     def apply_filter(self):
         self.buffer_lock.acquire(blocking=True)
-        self.drop_impossible_frames()
-        rospy.loginfo("Applying filter")
+        rospy.loginfo("Applying filter...")
         
-        for marker_name, frames in self.frames_buffer.items():
+        for marker_name in self.frames_buffer.keys():
             rospy.loginfo("  Processing marker: %s", marker_name)
-
-            self.median_filter(marker_name, self.frames_buffer[marker_name])
-            self.distance_filter(marker_name, self.frames_buffer[marker_name])
-            self.distance_filter(marker_name, self.frames_buffer[marker_name])
+            
+            self.drop_impossible_frames(marker_name)
+            self.median_filter(marker_name)
+            while not len(self.frames_buffer[marker_name]) in (0,1) :
+            	self.distance_filter(marker_name)
 
         self.buffer_lock.release()
+        rospy.loginfo("Finished filtering...")
 
-    def distance_filter(self, marker_name, frames):
-        if len(frames) == 0:
+    def distance_filter(self, marker_name):
+        cur_frames = self.frames_buffer[marker_name]
+
+        if len(cur_frames) == 0:
             return
 
-        translations = [x[0] for x in frames]
-        yaws = [f[1][2] for f in frames]
+        rospy.loginfo("  Applying distance filter")
+
+        translations = [x[0] for x in cur_frames]
+        yaws = [f[1][2] for f in cur_frames]
 
         avg_point = Util.apply_func(translations, Util.avg_alist)
         avg_yaw = Util.avg_alist(yaws)
@@ -169,37 +174,33 @@ class PoseFilter():
         distances = [Util.distance(avg_point, point) for point in translations]     
         avg_distance = Util.avg_alist(distances)
 
-        current_marker = self.frames_buffer[marker_name]
-        current_marker = [list1 + [distance] for list1, distance in zip(current_marker, distances)]
-
-        current_marker[:] = [f for f in current_marker if f[3] < avg_distance]
-
-        self.frames_buffer[marker_name] = current_marker
+        cur_frames[:] = [llist[0:3] + [distance] for llist, distance in zip(cur_frames, distances)]
+        cur_frames[:] = [f for f in cur_frames if f[3] < avg_distance]
 
         for mar in self.frames_buffer[marker_name]:
             print mar[0], mar[3]
 
-    def median_filter(self, marker_name, frames):
-        if len(frames) == 0:
+    def median_filter(self, marker_name):
+        cur_frames = self.frames_buffer[marker_name]
+
+        if len(cur_frames) == 0:
             return
         
-        translations = [x[0] for x in frames]
-        yaws = [f[1][2] for f in frames]
+        rospy.loginfo("  Applying median filter")
+
+        translations = [x[0] for x in cur_frames]
+        yaws = [f[1][2] for f in cur_frames]
 
         median_point = Util.apply_func(translations, Util.median_alist)
         median_yaw = Util.median_alist(yaws)
-        
         medians = list(median_point) + [median_yaw]
 
-        current_marker = self.frames_buffer[marker_name]
-        current_marker[:] = [f for f in current_marker if self.determine_median_validity(f, medians)]
+        cur_frames[:] = [f for f in cur_frames if self.determine_median_validity(f, medians)]
 
-    def drop_impossible_frames(self):
-        rospy.loginfo("Dropping impossible frames")
-        for marker_name in self.frames_buffer.keys():
-            rospy.loginfo("  Processing marker: %s", marker_name)
-            current_marker = self.frames_buffer[marker_name]
-            current_marker[:] = [f for f in current_marker if self.determine_map_validity(f)]
+    def drop_impossible_frames(self, marker_name):
+        rospy.loginfo("  Dropping impossible frames")
+        cur_frames = self.frames_buffer[marker_name]
+        cur_frames[:] = [f for f in cur_frames if self.determine_map_validity(f)]
 
     def determine_median_validity(self, frame, medians):
         if abs(medians[0] - frame[0][0]) > self.median_x_treshold:
@@ -232,8 +233,8 @@ class PoseFilter():
 
 class DriftCorrection():
 
-    #marker_names = [8,11,28,48,89]
-    marker_names = [28]
+    marker_names = [8,11,28,48,89]
+    #marker_names = [28]
 
     odom_frame_id   = "odom"
     camera_frame_id = "CameraTop_frame"
@@ -313,8 +314,8 @@ class DriftCorrection():
             map_to_footprint_translation = tfmath.translation_from_matrix(map_to_footprint_tf)
             map_to_footprint_rotation    = tfmath.euler_from_matrix(map_to_footprint_tf)
 
-            rospy.loginfo("Foot Tran {0} {1:.3f} {2:.3f} {3:.3f}".format(marker_name, *map_to_footprint_translation))
-            rospy.loginfo("Foot Rot  {0} {1:.3f} {2:.3f} {3:.3f}".format(marker_name, *map_to_footprint_rotation))
+            #rospy.loginfo("Foot Tran {0} {1:.3f} {2:.3f} {3:.3f}".format(marker_name, *map_to_footprint_translation))
+            #rospy.loginfo("Foot Rot  {0} {1:.3f} {2:.3f} {3:.3f}".format(marker_name, *map_to_footprint_rotation))
 
             self.pose_filter.add_frame(marker_name, [map_to_footprint_translation, map_to_footprint_rotation, odom_to_footprint_tf])
 
