@@ -19,73 +19,10 @@ from std_srvs.srv import Empty
 from ar_pose.msg import ARMarkers
 from geometry_msgs.msg import (Point, Quaternion)
 
-SampleStat = namedtuple('SampleStat', ['dropped', 'initial', 'avg_dis_to_avg'])
+import util
 
-class Util():
+SampleStat = namedtuple('SampleStat', ['dropped', 'initial', 'mad'])
 
-    @staticmethod
-    def matrix_from_pose(tran, rot):
-        translation_matrix = tfmath.translation_matrix(tran)
-        quaternion_matrix  = tfmath.quaternion_matrix(rot)
-        return np.dot(translation_matrix, quaternion_matrix)
-
-    @staticmethod
-    def matrix_from_pose_msg(pose):
-        translation = Util.tuple_from_vector(pose.position)
-        orientation = Util.tuple_from_quat(pose.orientation)
-        return Util.matrix_from_pose(translation, orientation)
-
-    @staticmethod
-    def pose_from_matrix(mat):
-        tran = tfmath.translation_from_matrix(mat)
-        quat = tfmath.quaternion_from_matrix(mat)
-        return (tran, quat)
-
-    @staticmethod
-    def avg_transforms(transforms):
-        translations = [transform[0] for transform in transforms]
-        yaws         = [transform[1][2] for transform in transforms]
-
-        avg_tran = Util.apply_func(translations, Util.avg_alist)
-        avg_yaw  = Util.avg_alist(yaws)
-        avg_rot  = (0,0,avg_yaw)
-
-        return (avg_tran, avg_rot)
-
-    @staticmethod
-    def tuple_from_vector(vector):
-        return (vector.x, vector.y, vector.z)
-
-    @staticmethod
-    def tuple_from_quat(quat):
-        return (quat.x, quat.y, quat.z, quat.w)
-
-    @staticmethod
-    def distance(p0, p1):
-        return math.sqrt((p0[0] - p1[0])**2 + (p0[1] - p1[1])**2 + (p0[2] - p1[2])**2)
-
-    @staticmethod
-    def median_alist(alist):
-        sorted_list = sorted(alist)
-        length = len(sorted_list)
-        if not length % 2:
-            return (sorted_list[length/2]+sorted_list[length/2-1])/2.0
-        else:
-            return (sorted_list[length/2])  
-
-    @staticmethod
-    def avg_alist(alist):
-        return reduce(lambda x, y: x + y, alist) / len(alist)
-
-    @staticmethod
-    def apply_func(translations, func):
-        xs, ys, zs = zip(*translations)
-        return func(xs), func(ys), func(zs)
-
-    @staticmethod
-    def combine_dicts(a, b, op=operator.add):
-        return dict(a.items() + b.items() +
-            [(k, op(a[k], b[k])) for k in b.viewkeys() & a.viewkeys()])
 
 class PoseFilter():
 
@@ -120,7 +57,7 @@ class PoseFilter():
     def add_batch(self, frames_batch):
         self.buffer_lock.acquire(blocking=True)
         if not self.buffer_latched:
-            self.frames_buffer = Util.combine_dicts(self.frames_buffer, frames_batch)
+            self.frames_buffer = util.combine_dicts(self.frames_buffer, frames_batch)
 
         self.buffer_lock.release()
 
@@ -184,11 +121,11 @@ class PoseFilter():
             over_median_dropped = self.median_filter(marker_name)
             
             total_dropped = (impossible_dropped + over_median_dropped)
-            avg_dis_to_avg = self.mad_filter(marker_name)
+            mad = self.mad_filter(marker_name)
 
             marker_stats[marker_name] = SampleStat(dropped=total_dropped,
                                                    initial=initial_frames_len,
-                                                   avg_dis_to_avg=avg_dis_to_avg)
+                                                   mad=mad)
 
         self.buffer_lock.release()
         rospy.loginfo("Finished filtering...")
@@ -215,16 +152,16 @@ class PoseFilter():
         rospy.loginfo("    Markers qualified for best mad ")
         rospy.loginfo("      {0:7} {1:7}".format("Marker:", "mad"))
         for marker_name in markers_matching_max:
-            rospy.loginfo("      {0:7} {1:.3f}".format(marker_name, marker_stats[marker_name].avg_dis_to_avg))
+            rospy.loginfo("      {0:7} {1:.3f}".format(marker_name, marker_stats[marker_name].mad))
 
-        best_marker_name = min(markers_matching_max, key=lambda x: marker_stats[x].avg_dis_to_avg)
+        best_marker_name = min(markers_matching_max, key=lambda x: marker_stats[x].mad)
 
         rospy.loginfo("    Decision phase finished.")
         rospy.loginfo("    Best marker is: %s", best_marker_name)
 
         best_frames = self.frames_buffer[best_marker_name]
 
-        average_frames    = Util.avg_transforms(best_frames)
+        average_frames    = util.avg_transforms(best_frames)
         random_odom_frame = random.choice(best_frames)[2]
 
         return (best_marker_name, average_frames, random_odom_frame)
@@ -244,12 +181,12 @@ class PoseFilter():
         translations = [x[0] for x in cur_frames]
         yaws = [f[1][2] for f in cur_frames]
 
-        avg_point = Util.apply_func(translations, Util.avg_alist)
-        avg_yaw = Util.avg_alist(yaws)
+        avg_point = util.apply_func(translations, util.avg_alist)
+        avg_yaw = util.avg_alist(yaws)
         rospy.loginfo("  {0} Averages:".format(marker_name))
         rospy.loginfo("    yaw: {0:.3f} x: {1:.3f} y: {2:.3f} z: {3:.3f}".format(avg_yaw, *avg_point))
-        distances = [Util.distance(avg_point, point) for point in translations]     
-        mad = Util.avg_alist(distances)
+        distances = [util.distance(avg_point, point) for point in translations]     
+        mad = util.avg_alist(distances)
 
         cur_frames[:] = [llist[0:3] + [distance] for llist, distance in zip(cur_frames, distances)]
         cur_frames[:] = [f for f in cur_frames if f[3] < mad]
@@ -272,8 +209,8 @@ class PoseFilter():
         translations = [x[0] for x in cur_frames]
         yaws = [f[1][2] for f in cur_frames]
 
-        median_point = Util.apply_func(translations, Util.median_alist)
-        median_yaw = Util.median_alist(yaws)
+        median_point = util.apply_func(translations, util.median_alist)
+        median_yaw = util.median_alist(yaws)
         medians = list(median_point) + [median_yaw]
         rospy.loginfo("  {0} Medians:".format(marker_name))
         rospy.loginfo("    x: {0:.3f} y: {1:.3f} z: {2:.3f} yaw: {3:.3f}".format(*medians))
@@ -328,6 +265,8 @@ class DriftCorrection():
     marker_names = [8,11,28,48,89]
     #marker_names = [28]
 
+    cont_localization = False
+
     map_frame_id    = "map"
     odom_frame_id   = "odom"
     camera_frame_id = "CameraTop_frame"
@@ -338,6 +277,7 @@ class DriftCorrection():
     marker_static_tranformations = defaultdict(tfmath.identity_matrix) 
 
     localize_srv_server = None
+    cont_localization_srv_server = None
 
     pose_filter = None
 
@@ -351,12 +291,15 @@ class DriftCorrection():
         self.marker_names   = ["4x4_" + str(marker_name) for marker_name in self.marker_names]
 
         self.localize_srv_server = rospy.Service("localize_nao", Empty, self.handle_localization)
+        self.cont_localization_srv_server = rospy.Service("cont_localization", Empty, self.handle_cont_localization)
 
     def start(self):
         self.get_static_marker_transforms()
         rospy.Subscriber("ar_pose_marker", ARMarkers, self.marker_callback, queue_size=1)
         r = rospy.Rate(10) # 10hz
-        while not rospy.is_shutdown():      
+        while not rospy.is_shutdown():     
+            if self.cont_localization == True:
+                pass
             self.tf_broadcaster.sendTransform(self.current_drift_correction[0],
                                               self.current_drift_correction[1],
                                               rospy.Time.now(),
@@ -370,7 +313,7 @@ class DriftCorrection():
             self.tf_listener.waitForTransform(self.map_frame_id, marker_name, rospy.Time(), rospy.Duration(4.0))
             tran, rot = self.tf_listener.lookupTransform(self.map_frame_id, marker_name, rospy.Time(0))
             rospy.loginfo("Static TF: {0} {1:.3f} {2:.3f} {3:.3f}".format(marker_name, *tran))
-            self.marker_static_tranformations[marker_name] = Util.matrix_from_pose(tran, rot)
+            self.marker_static_tranformations[marker_name] = util.matrix_from_pose(tran, rot)
 
     def get_transform(self, from_frame, to_frame):
     	trans, rot = (None,None)
@@ -381,14 +324,14 @@ class DriftCorrection():
             trans, rot = self.tf_listener.lookupTransform(from_frame, to_frame, now)
         except (tf.Exception) as e:
             rospy.logwarn("Error while getting runtime transform \n %s", e)
-        return Util.matrix_from_pose(trans, rot)
+        return util.matrix_from_pose(trans, rot)
 
     def update_drift(self, location_mat, odom_mat):
         tran, eulers = location_mat
-        location_mat = Util.matrix_from_pose(tran, tfmath.quaternion_from_euler(*eulers))
+        location_mat = util.matrix_from_pose(tran, tfmath.quaternion_from_euler(*eulers))
         inv_odom_mat = tfmath.inverse_matrix(odom_mat)
         drift_correction_mat = np.dot(location_mat, inv_odom_mat)
-        self.current_drift_correction = Util.pose_from_matrix(drift_correction_mat)
+        self.current_drift_correction = util.pose_from_matrix(drift_correction_mat)
 
     def marker_callback(self, data):
 
@@ -405,7 +348,7 @@ class DriftCorrection():
             if marker_name not in self.marker_static_tranformations.keys():
                 continue
 
-            marker_tf        = Util.matrix_from_pose_msg(marker.pose.pose)
+            marker_tf        = util.matrix_from_pose_msg(marker.pose.pose)
             inv_marker_tf    = tfmath.inverse_matrix(marker_tf)
             map_to_camera_tf = np.dot(self.marker_static_tranformations[marker_name], inv_marker_tf)
             
@@ -426,10 +369,21 @@ class DriftCorrection():
 
     def handle_localization(self, request):
         rospy.loginfo("Received localization service request")
-        marker_name, location, odom = self.pose_filter.locate()
+        result = self.pose_filter.locate()
+        if not result:
+            rospy.logwarn("Could not locate Nao.")
+            return
+
+        marker_name, location, odom = result
         rospy.loginfo("Located from %s at:", marker_name)
         rospy.loginfo("YAW: {0:.3f} POS: [{1:.3f},{2:.3f},{3:.3f}]".format(location[1][2], *location[0]))
         self.update_drift(location, odom)
+
+    def handle_cont_localization(self, request):
+        rospy.loginfo("Received continous localization service request")
+        self.pose_filter.sample_size = 1
+        self.cont_localization = True
+    
 
 if __name__ == '__main__':
 

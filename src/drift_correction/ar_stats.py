@@ -19,7 +19,7 @@ class ARPoseStatistics():
     time_at_end       = None
 
     def __init__(self):
-        rospy.Subscriber("ar_pose_marker", ARMarkers, self.marker_callback, queue_size=1)
+        rospy.Subscriber("markers_filtered/map_to_footprint", ARMarkers, self.marker_callback, queue_size=1)
 
     def marker_callback(self, data):
 
