@@ -25,11 +25,18 @@ SampleStat = namedtuple('SampleStat', ['dropped', 'initial', 'mad'])
 
 
 class PoseFilter():
+    '''
+    Object that collects ARMarker frames and stores them in the dictionary with the key as a 
+    name of the marker, after performs filtering on the sample, deleting impossible frames,
+    performing median filter followed by MAD (median absolute deviation) filter.
+    '''
 
     sample_size  = 10
 
+    #retries per locate call
     max_retries = 3
 
+    # Treshold values for median filter
     median_yaw_treshold = 0.05
     median_x_treshold   = 0.2
     median_y_treshold   = 0.2
@@ -45,8 +52,11 @@ class PoseFilter():
     #Criteria for deciding on the marker choice
     max_left_marker_range = 1
 
+
     buffer_lock = None
     frame_buffer = None
+
+    # True if buffer is latched and does not accept more frames
     buffer_latched = True
 
     def __init__(self, sample_size):
@@ -54,6 +64,7 @@ class PoseFilter():
         self.frames_buffer = defaultdict(list)
         self.buffer_lock = RLock()
 
+    #Add frames to current dictionary (merge)
     def add_batch(self, frames_batch):
         self.buffer_lock.acquire(blocking=True)
         if not self.buffer_latched:
@@ -61,7 +72,13 @@ class PoseFilter():
 
         self.buffer_lock.release()
 
+
     def locate(self):
+        '''
+        Tries to locate Nao, until max_retries was excedeed
+        Clears the buffer and waits until one marker fills the sample
+        Applies the filtering and returns teh localized pose
+        '''
         attemps = 1
         located = False
         localized_pose = None
@@ -79,6 +96,9 @@ class PoseFilter():
         return localized_pose
 
     def wait_for_buffer(self):
+        '''
+        Waits until buffer is full
+        '''
         r = rospy.Rate(10) # 10Hz
         self.buffer_latched = False
         while not self.is_buffer_ready():
@@ -86,6 +106,10 @@ class PoseFilter():
         self.buffer_latched = True            
 
     def is_buffer_ready(self):
+        '''
+        Determines if buffer is ready,
+        by checking whether one of the marker is filled until @sample_size
+        '''
         self.buffer_lock.acquire(blocking=True)
         ready = False
         for current_marker in self.frames_buffer.values():
@@ -96,6 +120,9 @@ class PoseFilter():
         return ready
 
     def clear_buffer(self):
+        '''
+        Clears the buffer 
+        '''
         self.buffer_lock.acquire(blocking=True)
 
         for k,v in self.frames_buffer.items():
@@ -105,6 +132,11 @@ class PoseFilter():
         self.buffer_lock.release()
 
     def apply_filter(self):
+        '''
+        Applies filtering, first dropping impossible frames, after 
+        applying median and MAD filter, and at the end deciding on the
+        winning marker
+        '''
         self.buffer_lock.acquire(blocking=True)
         rospy.loginfo("Applying filter...")
         
@@ -132,6 +164,11 @@ class PoseFilter():
         return self.decide_marker(marker_stats)
 
     def decide_marker(self, marker_stats):
+        '''
+        Decides the winning marker, by looking how many frames where dropped
+        and choosing those which are at @max_left_marker_range far away from each other.
+        After the winning marker is determined by getting lowest MAD from those markers.
+        '''
         rospy.loginfo("Deciding marker...")
 
         rospy.loginfo("  {0:7} {1:7} {2:7}".format("Frames:", "dropped", "caught"))
@@ -167,6 +204,10 @@ class PoseFilter():
         return (best_marker_name, average_frames, random_odom_frame)
 
     def mad_filter(self, marker_name):
+        '''
+        MAD filter calculated MAD for each marker,
+        and drops all which have the distance to the average higher than MAD
+        '''
         cur_frames = self.frames_buffer[marker_name]
 
         if len(cur_frames) == 0:
@@ -199,6 +240,9 @@ class PoseFilter():
         return mad
 
     def median_filter(self, marker_name):
+        '''
+        Median filter drops all that are above the median tresholds
+        '''
         cur_frames = self.frames_buffer[marker_name]
 
         if len(cur_frames) == 0:
@@ -222,6 +266,10 @@ class PoseFilter():
         return before_frames_len - len(cur_frames)
 
     def drop_impossible_frames(self, marker_name):
+        '''
+        Drop impossible filter, drops all frames which are way above/beneath the ground (look tresholds)
+        or the orientation of the robot makes it impossible for him to move (e.g. it's not standing)
+        '''
         rospy.loginfo("  Dropping impossible frames")
         
         cur_frames = self.frames_buffer[marker_name]
@@ -232,6 +280,9 @@ class PoseFilter():
         return before_frames_len - len(cur_frames)
 
     def determine_median_validity(self, frame, medians):
+        '''
+        Determine function which compares medians and frames
+        '''
         if abs(medians[0] - frame[0][0]) > self.median_x_treshold:
             rospy.loginfo("\tOver median x treshold")
             return False
@@ -248,6 +299,9 @@ class PoseFilter():
             return True          
 
     def determine_map_validity(self, frame):
+        '''
+        Determine function which compares frames to impossible pose tresholds
+        '''
         if abs(frame[0][2]) > self.ground_treshold:
             rospy.loginfo("\tOver ground positional treshold: {0:3f}".format(frame[0][2]))
             return False
@@ -265,8 +319,6 @@ class DriftCorrection():
     marker_names = [8,11,28,48,89]
     #marker_names = [28]
 
-    cont_localization = False
-
     map_frame_id    = "map"
     odom_frame_id   = "odom"
     camera_frame_id = "CameraTop_frame"
@@ -277,7 +329,6 @@ class DriftCorrection():
     marker_static_tranformations = defaultdict(tfmath.identity_matrix) 
 
     localize_srv_server = None
-    cont_localization_srv_server = None
 
     pose_filter = None
 
@@ -291,15 +342,15 @@ class DriftCorrection():
         self.marker_names   = ["4x4_" + str(marker_name) for marker_name in self.marker_names]
 
         self.localize_srv_server = rospy.Service("localize_nao", Empty, self.handle_localization)
-        self.cont_localization_srv_server = rospy.Service("cont_localization", Empty, self.handle_cont_localization)
 
     def start(self):
+        '''
+        Starts drift correction, publishing current correction every 100 miliseconds
+        '''
         self.get_static_marker_transforms()
         rospy.Subscriber("ar_pose_marker", ARMarkers, self.marker_callback, queue_size=1)
         r = rospy.Rate(10) # 10hz
         while not rospy.is_shutdown():     
-            if self.cont_localization == True:
-                pass
             self.tf_broadcaster.sendTransform(self.current_drift_correction[0],
                                               self.current_drift_correction[1],
                                               rospy.Time.now(),
@@ -308,6 +359,9 @@ class DriftCorrection():
             r.sleep()
 
     def get_static_marker_transforms(self):
+        '''
+        Gets static transformations from map frame to marker frame
+        '''
         for marker_name in self.marker_names:
             rospy.loginfo("Loading static transform for marker %s", marker_name)
             self.tf_listener.waitForTransform(self.map_frame_id, marker_name, rospy.Time(), rospy.Duration(4.0))
@@ -316,6 +370,9 @@ class DriftCorrection():
             self.marker_static_tranformations[marker_name] = util.matrix_from_pose(tran, rot)
 
     def get_transform(self, from_frame, to_frame):
+        '''
+        Queries TF to get earliest transformation @from_frame to @to_frame
+        '''
     	trans, rot = (None,None)
         self.tf_listener.waitForTransform(from_frame, to_frame, rospy.Time(), rospy.Duration(4.0))
         try:
@@ -327,6 +384,11 @@ class DriftCorrection():
         return util.matrix_from_pose(trans, rot)
 
     def update_drift(self, location_mat, odom_mat):
+        '''
+        Updates the current drift correction
+        from map to base_footprint transformation and
+        odom to base_footprint transformations
+        '''
         tran, eulers = location_mat
         location_mat = util.matrix_from_pose(tran, tfmath.quaternion_from_euler(*eulers))
         inv_odom_mat = tfmath.inverse_matrix(odom_mat)
@@ -334,7 +396,10 @@ class DriftCorrection():
         self.current_drift_correction = util.pose_from_matrix(drift_correction_mat)
 
     def marker_callback(self, data):
-
+        '''
+        Receives raw data from ar_pose package
+        and stores it to pose_filter
+        '''
         if len(data.markers) < 1:
             #rospy.loginfo("No markers detected")
             return
@@ -368,6 +433,9 @@ class DriftCorrection():
         self.pose_filter.add_batch(frames_batch)
 
     def handle_localization(self, request):
+        '''
+        Handles localization service request
+        '''
         rospy.loginfo("Received localization service request")
         result = self.pose_filter.locate()
         if not result:
@@ -378,12 +446,6 @@ class DriftCorrection():
         rospy.loginfo("Located from %s at:", marker_name)
         rospy.loginfo("YAW: {0:.3f} POS: [{1:.3f},{2:.3f},{3:.3f}]".format(location[1][2], *location[0]))
         self.update_drift(location, odom)
-
-    def handle_cont_localization(self, request):
-        rospy.loginfo("Received continous localization service request")
-        self.pose_filter.sample_size = 1
-        self.cont_localization = True
-    
 
 if __name__ == '__main__':
 
